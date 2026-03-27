@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { z } from 'zod';
+import JSZip from 'jszip';
 import type {
   DataEnvelope as IDataEnvelope,
   IAppContext,
@@ -16,7 +17,7 @@ const TASK_COUNT_CHANGED = 'TASK_COUNT_CHANGED';
 const IMPORT_TASKS_EVENT = 'DAVINVI_IMPORT_TASKS';
 const PLUGIN_CONTAINER_ID = `plugin-${PLUGIN_ID}`;
 
-const ModifierSchema = z.enum(['none', 'alt', 'ctrl', 'shift']);
+const ModifierSchema = z.enum(['none', 'alt', 'ctrl', 'shift', 'copy', 'paste', 'enter']);
 
 const TaskStepSchema = z.object({
   modifier: ModifierSchema,
@@ -75,6 +76,9 @@ const MODIFIER_OPTIONS: Array<{ label: string; value: z.infer<typeof ModifierSch
   { label: 'Alt', value: 'alt' },
   { label: 'Ctrl', value: 'ctrl' },
   { label: 'Shift', value: 'shift' },
+  { label: '複製 (Ctrl+C)', value: 'copy' },
+  { label: '貼上 (Ctrl+V)', value: 'paste' },
+  { label: 'Enter', value: 'enter' },
 ];
 
 const MODIFIER_LABEL: Record<z.infer<typeof ModifierSchema>, string> = {
@@ -82,6 +86,9 @@ const MODIFIER_LABEL: Record<z.infer<typeof ModifierSchema>, string> = {
   alt: 'Alt',
   ctrl: 'Ctrl',
   shift: 'Shift',
+  copy: 'Copy',
+  paste: 'Paste',
+  enter: 'Enter',
 };
 
 const SPECIAL_SENDKEY_MAP: Record<string, string> = {
@@ -111,6 +118,9 @@ const MODIFIER_PREFIX: Record<z.infer<typeof ModifierSchema>, string> = {
   alt: '%',
   ctrl: '^',
   shift: '+',
+  copy: '',
+  paste: '',
+  enter: '',
 };
 
 const initialForm: TaskFormState = {
@@ -157,6 +167,19 @@ function stepToSendKeys(step: TaskStep): string {
     return step.key;
   }
 
+  // Special action modifiers (copy/paste/enter) map to fixed send sequences
+  if (step.modifier === 'copy') {
+    return '^c';
+  }
+
+  if (step.modifier === 'paste') {
+    return '^v';
+  }
+
+  if (step.modifier === 'enter') {
+    return '{ENTER}';
+  }
+
   const keyToken = normalizeStepKeyToken(step.key);
   return `${MODIFIER_PREFIX[step.modifier]}${keyToken}`;
 }
@@ -164,6 +187,10 @@ function stepToSendKeys(step: TaskStep): string {
 function stepToLabel(step: TaskStep): string {
   if (step.isRawSendKeys) {
     return `Raw: ${step.key}`;
+  }
+
+  if (step.modifier === 'copy' || step.modifier === 'paste' || step.modifier === 'enter') {
+    return `${MODIFIER_LABEL[step.modifier]}`;
   }
 
   return `${MODIFIER_LABEL[step.modifier]} + ${step.key}`;
@@ -399,65 +426,10 @@ function buildBatContent(ps1FileName: string): string {
 }
 
 // downloadFile removed (packaging now uses TAR creation)
+// downloadFile removed; export now creates a single uncompressed tar archive
 
-function padTo512(buf: Uint8Array): Uint8Array {
-  const pad = (512 - (buf.length % 512)) % 512;
-  if (pad === 0) return buf;
-  const out = new Uint8Array(buf.length + pad);
-  out.set(buf, 0);
-  return out;
-}
-
-function strToUint8(str: string): Uint8Array {
-  return new TextEncoder().encode(str);
-}
-
-function makeTarHeader(name: string, size: number, mode = 0o644): Uint8Array {
-  const header = new Uint8Array(512);
-  function writeString(offset: number, length: number, value: string) {
-    const bytes = strToUint8(value);
-    header.set(bytes.subarray(0, Math.min(bytes.length, length)), offset);
-  }
-
-  writeString(0, 100, name);
-  writeString(100, 8, (mode | 0).toString(8).padStart(7, '0') + '\0');
-  writeString(108, 8, (0).toString(8).padStart(7, '0') + '\0');
-  writeString(116, 12, size.toString(8).padStart(11, '0') + '\0');
-  writeString(148, 12, Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0');
-  header[156] = '0'.charCodeAt(0); // typeflag '0'
-  // ustar magic
-  writeString(257, 6, 'ustar\0');
-  writeString(263, 2, '00');
-
-  // checksum: fill with spaces first
-  for (let i = 148; i < 156; i += 1) header[i] = 0x20;
-  // compute checksum
-  let sum = 0;
-  for (let i = 0; i < 512; i += 1) sum += header[i];
-  writeString(148, 8, sum.toString(8).padStart(6, '0') + '\0\x20');
-  return header;
-}
-
-function createTar(files: Array<{ name: string; content: string }>): Blob {
-  const parts: Uint8Array[] = [];
-  for (const f of files) {
-    const contentBuf = strToUint8(f.content);
-    const header = makeTarHeader(f.name, contentBuf.length);
-    parts.push(header);
-    parts.push(padTo512(contentBuf));
-  }
-  // two 512-byte blocks of zero for EOF
-  parts.push(new Uint8Array(512));
-  parts.push(new Uint8Array(512));
-  const totalLen = parts.reduce((s, p) => s + p.length, 0);
-  const combined = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const p of parts) {
-    combined.set(p, offset);
-    offset += p.length;
-  }
-  return new Blob([combined], { type: 'application/x-tar' });
-}
+// helper removed (no TAR creation)
+// Use JSZip to create zip archives in-browser
 
 type PluginAppProps = {
   context: IAppContext;
@@ -567,6 +539,19 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
   }, [context]);
 
   const normalizedStepPreview = useMemo(() => {
+    // show fixed preview for special actions
+    if (form.stepModifier === 'copy') {
+      return '^c';
+    }
+
+    if (form.stepModifier === 'paste') {
+      return '^v';
+    }
+
+    if (form.stepModifier === 'enter') {
+      return '{ENTER}';
+    }
+
     const keyToken = normalizeStepKeyToken(form.stepKey);
     if (!keyToken) {
       return '';
@@ -577,13 +562,16 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
 
   const addStep = () => {
     const trimmedKey = form.stepKey.trim();
-    if (!trimmedKey) {
+    const isSpecial = form.stepModifier === 'copy' || form.stepModifier === 'paste' || form.stepModifier === 'enter';
+    if (!trimmedKey && !isSpecial) {
       return;
     }
 
+    const keyValue = trimmedKey || form.stepModifier; // use modifier token for special actions to satisfy schema
+
     const nextStep: TaskStep = {
       modifier: form.stepModifier,
-      key: trimmedKey,
+      key: keyValue,
       delayAfterMs: Math.max(0, Math.floor(form.stepDelayAfterMs || 0)),
       isRawSendKeys: false,
     };
@@ -652,45 +640,27 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
       return;
     }
 
-    // If there's exactly one task, package that task's PS1+BAT into a single tar named after the task.
-    const files: Array<{ name: string; content: string }> = [];
-    if (valid.data.length === 1) {
-      const task = valid.data[0];
-      const safeName = task.title.replace(/[^a-zA-Z0-9_\-\. ]/g, '_') || 'task';
-      const ps1Name = `${safeName}.ps1`;
-      const batName = `${safeName}.bat`;
-      const ps1 = buildPs1Content([task], initialDelayMs, repeatCount);
-      const bat = buildBatContent(ps1Name);
-      files.push({ name: ps1Name, content: ps1 });
-      files.push({ name: batName, content: bat });
-      const tar = createTar(files);
-      const url = URL.createObjectURL(tar);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `${safeName}.tar`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-      return;
-    }
-
-    // Multiple tasks: include each task as separate pair inside a single tar
+    // Create a single uncompressed tar archive containing each task in its own folder.
+    const zip = new JSZip();
     for (const task of valid.data) {
       const safeName = task.title.replace(/[^a-zA-Z0-9_\-\. ]/g, '_') || `task_${task.id.slice(0, 6)}`;
-      const ps1Name = `${safeName}.ps1`;
-      const batName = `${safeName}.bat`;
-      const ps1 = buildPs1Content([task], initialDelayMs, repeatCount);
-      const bat = buildBatContent(ps1Name);
-      files.push({ name: ps1Name, content: ps1 });
-      files.push({ name: batName, content: bat });
+      const folder = zip.folder(safeName)!;
+      const ps1File = `${safeName}.ps1`;
+      const ps1Content = buildPs1Content([task], initialDelayMs, repeatCount);
+      const batContent = buildBatContent(ps1File);
+      folder.file(ps1File, ps1Content);
+      folder.file('Click to Start.bat', batContent);
     }
 
-    const tar = createTar(files);
-    const url = URL.createObjectURL(tar);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'davinvi_tasks.tar';
-    anchor.click();
-    URL.revokeObjectURL(url);
+    const archiveName = valid.data.length === 1 ? `${valid.data[0].title.replace(/[^a-zA-Z0-9_\-\. ]/g, '_') || 'task'}.zip` : 'davinvi_tasks.zip';
+    void zip.generateAsync({ type: 'blob' }).then((contentBlob) => {
+      const url = URL.createObjectURL(contentBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = archiveName;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
   };
 
   const updateForm = <K extends keyof TaskFormState>(key: K, value: TaskFormState[K]) => {
