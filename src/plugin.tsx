@@ -608,8 +608,18 @@ let root: Root | null = null;
 let pluginContainerEl: HTMLElement | null = null;
 let styleEl: HTMLStyleElement | null = null;
 
+function findDirectChildContainer(hostContainer: HTMLElement): HTMLElement | null {
+  for (const node of hostContainer.children) {
+    if (node instanceof HTMLElement && node.id === PLUGIN_CONTAINER_ID) {
+      return node;
+    }
+  }
+
+  return null;
+}
+
 function ensurePluginContainer(hostContainer: HTMLElement): HTMLElement {
-  const existing = hostContainer.querySelector<HTMLElement>(`#${PLUGIN_CONTAINER_ID}`);
+  const existing = findDirectChildContainer(hostContainer);
   if (existing) {
     existing.innerHTML = '';
     return existing;
@@ -651,7 +661,7 @@ const plugin: IPlugin = {
     root?.unmount();
     root = null;
 
-    const isolated = container.querySelector<HTMLElement>(`#${PLUGIN_CONTAINER_ID}`);
+    const isolated = findDirectChildContainer(container);
     if (isolated) {
       isolated.innerHTML = '';
     }
