@@ -112,6 +112,32 @@ appContext.eventBus.emit('DAVINVI_IMPORT_TASKS', tasks);
 
 ## License
 This project follows the license in the repository root.
+
+## Demo GIF
+
+A short demo GIF showing creating a task and exporting the PS1+BAT can be added to `assets/demo.gif` and referenced below:
+
+![Demo](assets/demo.gif)
+
+If you want to produce the GIF locally, here are quick options:
+
+- Windows (ffmpeg - record a window by title, convert to GIF):
+
+```powershell
+ffmpeg -f gdigrab -framerate 30 -i title="Davinvi - localhost:5173" -c:v libx264 -preset veryfast -crf 18 output.mp4
+ffmpeg -i output.mp4 -vf "fps=15,scale=800:-1:flags=lanczos" -loop 0 demo.gif
+```
+
+- Higher-quality conversion using `gifski` (recommended):
+
+```powershell
+ffmpeg -i output.mp4 -vf fps=15,scale=800:-1:flags=lanczos -f image2pipe -vcodec ppm - | gifski --fps 15 -o assets/demo.gif
+```
+
+- Quick alternatives: use ShareX or ScreenToGif (Windows GUI) or OBS (cross-platform) to record then export to GIF.
+
+After creating `assets/demo.gif`, add it to the repo and commit — the README will display the demo.
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
