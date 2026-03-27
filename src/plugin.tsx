@@ -16,7 +16,26 @@ const TASK_COUNT_CHANGED = 'TASK_COUNT_CHANGED';
 const IMPORT_TASKS_EVENT = 'DAVINVI_IMPORT_TASKS';
 const PLUGIN_CONTAINER_ID = `plugin-${PLUGIN_ID}`;
 
+const ModifierSchema = z.enum(['none', 'alt', 'ctrl', 'shift']);
+
+const TaskStepSchema = z.object({
+  modifier: ModifierSchema,
+  key: z.string().min(1),
+  delayAfterMs: z.number().int().nonnegative(),
+  isRawSendKeys: z.boolean().optional().default(false),
+});
+
 const TaskSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  steps: z.array(TaskStepSchema).min(1),
+  requireInput: z.boolean(),
+  inputMode: z.enum(['manual', 'list']),
+  manualValue: z.string(),
+  listValues: z.array(z.string()),
+});
+
+const LegacyTaskSchema = z.object({
   id: z.string().min(1),
   title: z.string().min(1),
   hotkey: z.string().min(1),
@@ -30,6 +49,7 @@ const TaskSchema = z.object({
 const TaskListSchema = z.array(TaskSchema);
 
 type Task = z.infer<typeof TaskSchema>;
+type TaskStep = z.infer<typeof TaskStepSchema>;
 
 type RestoreResult = {
   tasks: Task[];
@@ -40,35 +60,155 @@ type RestoreResult = {
 
 type TaskFormState = {
   title: string;
-  hotkey: string;
-  customHotkey: string;
-  delayMs: number;
+  stepModifier: z.infer<typeof ModifierSchema>;
+  stepKey: string;
+  stepDelayAfterMs: number;
+  steps: TaskStep[];
   requireInput: boolean;
   inputMode: 'manual' | 'list';
   manualValue: string;
   listText: string;
 };
 
-const HOTKEY_PRESETS = [
-  { label: 'Ctrl + V', value: '^v' },
-  { label: 'Shift + F6', value: '+{F6}' },
-  { label: 'Ctrl + S', value: '^s' },
-  { label: 'Enter', value: '{ENTER}' },
-  { label: 'Alt + Tab', value: '%{TAB}' },
-  { label: 'Custom (SendKeys syntax)', value: '__CUSTOM__' },
+const MODIFIER_OPTIONS: Array<{ label: string; value: z.infer<typeof ModifierSchema> }> = [
+  { label: '空白', value: 'none' },
+  { label: 'Alt', value: 'alt' },
+  { label: 'Ctrl', value: 'ctrl' },
+  { label: 'Shift', value: 'shift' },
 ];
+
+const MODIFIER_LABEL: Record<z.infer<typeof ModifierSchema>, string> = {
+  none: 'None',
+  alt: 'Alt',
+  ctrl: 'Ctrl',
+  shift: 'Shift',
+};
+
+const SPECIAL_SENDKEY_MAP: Record<string, string> = {
+  enter: 'ENTER',
+  tab: 'TAB',
+  esc: 'ESC',
+  escape: 'ESC',
+  space: 'SPACE',
+  backspace: 'BACKSPACE',
+  delete: 'DELETE',
+  del: 'DELETE',
+  insert: 'INSERT',
+  home: 'HOME',
+  end: 'END',
+  pgup: 'PGUP',
+  pageup: 'PGUP',
+  pgdn: 'PGDN',
+  pagedown: 'PGDN',
+  up: 'UP',
+  down: 'DOWN',
+  left: 'LEFT',
+  right: 'RIGHT',
+};
+
+const MODIFIER_PREFIX: Record<z.infer<typeof ModifierSchema>, string> = {
+  none: '',
+  alt: '%',
+  ctrl: '^',
+  shift: '+',
+};
 
 const initialForm: TaskFormState = {
   title: '',
-  hotkey: '^v',
-  customHotkey: '',
-  delayMs: 1000,
+  stepModifier: 'none',
+  stepKey: '',
+  stepDelayAfterMs: 1000,
+  steps: [],
   requireInput: true,
   inputMode: 'manual',
   manualValue: '',
   listText: '',
 };
 
+function normalizeStepKeyToken(rawKey: string): string {
+  const trimmed = rawKey.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return trimmed;
+  }
+
+  const lower = trimmed.toLowerCase();
+  const mapped = SPECIAL_SENDKEY_MAP[lower];
+  if (mapped) {
+    return `{${mapped}}`;
+  }
+
+  if (/^f\d{1,2}$/i.test(trimmed)) {
+    return `{${trimmed.toUpperCase()}}`;
+  }
+
+  if (trimmed.length === 1) {
+    return trimmed;
+  }
+
+  return `{${trimmed.toUpperCase()}}`;
+}
+
+function stepToSendKeys(step: TaskStep): string {
+  if (step.isRawSendKeys) {
+    return step.key;
+  }
+
+  const keyToken = normalizeStepKeyToken(step.key);
+  return `${MODIFIER_PREFIX[step.modifier]}${keyToken}`;
+}
+
+function stepToLabel(step: TaskStep): string {
+  if (step.isRawSendKeys) {
+    return `Raw: ${step.key}`;
+  }
+
+  return `${MODIFIER_LABEL[step.modifier]} + ${step.key}`;
+}
+
+function convertLegacyTask(legacyTask: z.infer<typeof LegacyTaskSchema>): Task {
+  return {
+    id: legacyTask.id,
+    title: legacyTask.title,
+    steps: [
+      {
+        modifier: 'none',
+        key: legacyTask.hotkey,
+        delayAfterMs: legacyTask.delayMs,
+        isRawSendKeys: true,
+      },
+    ],
+    requireInput: legacyTask.requireInput,
+    inputMode: legacyTask.inputMode,
+    manualValue: legacyTask.manualValue,
+    listValues: legacyTask.listValues,
+  };
+}
+
+function parseTaskList(input: unknown): Task[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  const parsed: Task[] = [];
+  for (const item of input) {
+    const taskResult = TaskSchema.safeParse(item);
+    if (taskResult.success) {
+      parsed.push(taskResult.data);
+      continue;
+    }
+
+    const legacyResult = LegacyTaskSchema.safeParse(item);
+    if (legacyResult.success) {
+      parsed.push(convertLegacyTask(legacyResult.data));
+    }
+  }
+
+  return parsed;
+}
 function previewPayload(value: unknown): string {
   if (typeof value === 'string') {
     return value.slice(0, 220);
@@ -142,19 +282,10 @@ function extractArrayCandidate(
 function sanitizeTasks(input: unknown): RestoreResult {
   const preview = previewPayload(input);
   const candidate = extractArrayCandidate(input);
-  const validation = TaskListSchema.safeParse(candidate.value);
-
-  if (!validation.success) {
-    return {
-      tasks: [],
-      extractedPath: candidate.extractedPath,
-      source: candidate.source,
-      preview,
-    };
-  }
+  const parsedTasks = parseTaskList(candidate.value);
 
   return {
-    tasks: validation.data,
+    tasks: parsedTasks,
     extractedPath: candidate.extractedPath,
     source: candidate.source,
     preview,
@@ -172,16 +303,27 @@ function psEscape(value: string): string {
   return value.replace(/'/g, "''");
 }
 
-function buildPs1Content(tasks: Task[], initialDelayMs: number): string {
+function buildPs1Content(tasks: Task[], initialDelayMs: number, repeatCount: number): string {
   const taskObjects = tasks
     .map((task) => {
+      const stepLines = task.steps
+        .map((step) => {
+          return [
+            '@{',
+            `  sendKeys='${psEscape(stepToSendKeys(step))}'`,
+            `  delayAfterMs=${Math.max(0, Math.floor(step.delayAfterMs || 0))}`,
+            '}',
+          ].join('\n');
+        })
+        .join(',\n');
       const listLines = task.listValues.map((item) => `'${psEscape(item)}'`).join(', ');
       return [
         '@{',
         `  id='${psEscape(task.id)}'`,
         `  title='${psEscape(task.title)}'`,
-        `  hotkey='${psEscape(task.hotkey)}'`,
-        `  delayMs=${task.delayMs}`,
+        '  steps=@(',
+        stepLines,
+        '  )',
         `  requireInput=$${task.requireInput ? 'true' : 'false'}`,
         `  inputMode='${task.inputMode}'`,
         `  manualValue='${psEscape(task.manualValue)}'`,
@@ -212,23 +354,29 @@ function buildPs1Content(tasks: Task[], initialDelayMs: number): string {
     '',
     '$wshell = New-Object -ComObject WScript.Shell',
     '',
-    'foreach ($task in $tasks) {',
-    '  if ($task.inputMode -eq "list") {',
-    '    foreach ($item in $task.listValues) {',
+    (repeatCount === 0 ? 'while ($true) {' : `for ($r = 0; $r -lt ${Math.max(0, repeatCount)}; $r++) {`),
+    '  foreach ($task in $tasks) {',
+    '    if ($task.inputMode -eq "list") {',
+    '      foreach ($item in $task.listValues) {',
+    '        if ($task.requireInput) {',
+    '          Set-Clipboard -Value $item',
+    '          Start-Sleep -Milliseconds 200',
+    '        }',
+    '        foreach ($action in $task.steps) {',
+    '          $wshell.SendKeys($action.sendKeys)',
+    '          Start-Sleep -Milliseconds $action.delayAfterMs',
+    '        }',
+    '      }',
+    '    } else {',
     '      if ($task.requireInput) {',
-    '        Set-Clipboard -Value $item',
+    '        Set-Clipboard -Value $task.manualValue',
     '        Start-Sleep -Milliseconds 200',
     '      }',
-    '      $wshell.SendKeys($task.hotkey)',
-    '      Start-Sleep -Milliseconds $task.delayMs',
+    '      foreach ($action in $task.steps) {',
+    '        $wshell.SendKeys($action.sendKeys)',
+    '        Start-Sleep -Milliseconds $action.delayAfterMs',
+    '      }',
     '    }',
-    '  } else {',
-    '    if ($task.requireInput) {',
-    '      Set-Clipboard -Value $task.manualValue',
-    '      Start-Sleep -Milliseconds 200',
-    '    }',
-    '    $wshell.SendKeys($task.hotkey)',
-    '    Start-Sleep -Milliseconds $task.delayMs',
     '  }',
     '}',
     '',
@@ -250,14 +398,65 @@ function buildBatContent(ps1FileName: string): string {
   ].join('\n');
 }
 
-function downloadFile(fileName: string, content: string, mimeType: string): void {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.click();
-  URL.revokeObjectURL(url);
+// downloadFile removed (packaging now uses TAR creation)
+
+function padTo512(buf: Uint8Array): Uint8Array {
+  const pad = (512 - (buf.length % 512)) % 512;
+  if (pad === 0) return buf;
+  const out = new Uint8Array(buf.length + pad);
+  out.set(buf, 0);
+  return out;
+}
+
+function strToUint8(str: string): Uint8Array {
+  return new TextEncoder().encode(str);
+}
+
+function makeTarHeader(name: string, size: number, mode = 0o644): Uint8Array {
+  const header = new Uint8Array(512);
+  function writeString(offset: number, length: number, value: string) {
+    const bytes = strToUint8(value);
+    header.set(bytes.subarray(0, Math.min(bytes.length, length)), offset);
+  }
+
+  writeString(0, 100, name);
+  writeString(100, 8, (mode | 0).toString(8).padStart(7, '0') + '\0');
+  writeString(108, 8, (0).toString(8).padStart(7, '0') + '\0');
+  writeString(116, 12, size.toString(8).padStart(11, '0') + '\0');
+  writeString(148, 12, Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0');
+  header[156] = '0'.charCodeAt(0); // typeflag '0'
+  // ustar magic
+  writeString(257, 6, 'ustar\0');
+  writeString(263, 2, '00');
+
+  // checksum: fill with spaces first
+  for (let i = 148; i < 156; i += 1) header[i] = 0x20;
+  // compute checksum
+  let sum = 0;
+  for (let i = 0; i < 512; i += 1) sum += header[i];
+  writeString(148, 8, sum.toString(8).padStart(6, '0') + '\0\x20');
+  return header;
+}
+
+function createTar(files: Array<{ name: string; content: string }>): Blob {
+  const parts: Uint8Array[] = [];
+  for (const f of files) {
+    const contentBuf = strToUint8(f.content);
+    const header = makeTarHeader(f.name, contentBuf.length);
+    parts.push(header);
+    parts.push(padTo512(contentBuf));
+  }
+  // two 512-byte blocks of zero for EOF
+  parts.push(new Uint8Array(512));
+  parts.push(new Uint8Array(512));
+  const totalLen = parts.reduce((s, p) => s + p.length, 0);
+  const combined = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const p of parts) {
+    combined.set(p, offset);
+    offset += p.length;
+  }
+  return new Blob([combined], { type: 'application/x-tar' });
 }
 
 type PluginAppProps = {
@@ -268,6 +467,7 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [hydrated, setHydrated] = useState(false);
   const [initialDelayMs, setInitialDelayMs] = useState(5000);
+  const [repeatCount, setRepeatCount] = useState<number>(1); // 0 = infinite
   const [form, setForm] = useState<TaskFormState>(initialForm);
   const firstPersistRef = useRef(true);
 
@@ -366,17 +566,49 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
     };
   }, [context]);
 
-  const resolvedHotkey = useMemo(() => {
-    if (form.hotkey === '__CUSTOM__') {
-      return form.customHotkey.trim();
+  const normalizedStepPreview = useMemo(() => {
+    const keyToken = normalizeStepKeyToken(form.stepKey);
+    if (!keyToken) {
+      return '';
     }
 
-    return form.hotkey.trim();
-  }, [form.customHotkey, form.hotkey]);
+    return `${MODIFIER_PREFIX[form.stepModifier]}${keyToken}`;
+  }, [form.stepKey, form.stepModifier]);
+
+  const addStep = () => {
+    const trimmedKey = form.stepKey.trim();
+    if (!trimmedKey) {
+      return;
+    }
+
+    const nextStep: TaskStep = {
+      modifier: form.stepModifier,
+      key: trimmedKey,
+      delayAfterMs: Math.max(0, Math.floor(form.stepDelayAfterMs || 0)),
+      isRawSendKeys: false,
+    };
+
+    const validation = TaskStepSchema.safeParse(nextStep);
+    if (!validation.success) {
+      return;
+    }
+
+    setForm((previous) => ({
+      ...previous,
+      steps: [...previous.steps, validation.data],
+      stepKey: '',
+    }));
+  };
+
+  const removeStep = (index: number) => {
+    setForm((previous) => ({
+      ...previous,
+      steps: previous.steps.filter((_, stepIndex) => stepIndex !== index),
+    }));
+  };
 
   const addTask = () => {
-    const hotkey = resolvedHotkey;
-    if (!form.title.trim() || !hotkey) {
+    if (!form.title.trim() || form.steps.length === 0) {
       return;
     }
 
@@ -384,8 +616,7 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
     const nextTask: Task = {
       id: crypto.randomUUID(),
       title: form.title.trim(),
-      hotkey,
-      delayMs: Math.max(0, Math.floor(form.delayMs || 0)),
+      steps: form.steps,
       requireInput: form.requireInput,
       inputMode: form.inputMode,
       manualValue: form.manualValue,
@@ -401,6 +632,7 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
     setForm((previous) => ({
       ...previous,
       title: '',
+      steps: [],
       manualValue: '',
       listText: '',
     }));
@@ -420,13 +652,45 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
       return;
     }
 
-    const ps1Name = 'davinvi_tasks.ps1';
-    const batName = 'run_davinvi_tasks.bat';
-    const ps1 = buildPs1Content(valid.data, initialDelayMs);
-    const bat = buildBatContent(ps1Name);
+    // If there's exactly one task, package that task's PS1+BAT into a single tar named after the task.
+    const files: Array<{ name: string; content: string }> = [];
+    if (valid.data.length === 1) {
+      const task = valid.data[0];
+      const safeName = task.title.replace(/[^a-zA-Z0-9_\-\. ]/g, '_') || 'task';
+      const ps1Name = `${safeName}.ps1`;
+      const batName = `${safeName}.bat`;
+      const ps1 = buildPs1Content([task], initialDelayMs, repeatCount);
+      const bat = buildBatContent(ps1Name);
+      files.push({ name: ps1Name, content: ps1 });
+      files.push({ name: batName, content: bat });
+      const tar = createTar(files);
+      const url = URL.createObjectURL(tar);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${safeName}.tar`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
 
-    downloadFile(ps1Name, ps1, 'text/plain;charset=utf-8');
-    downloadFile(batName, bat, 'text/plain;charset=utf-8');
+    // Multiple tasks: include each task as separate pair inside a single tar
+    for (const task of valid.data) {
+      const safeName = task.title.replace(/[^a-zA-Z0-9_\-\. ]/g, '_') || `task_${task.id.slice(0, 6)}`;
+      const ps1Name = `${safeName}.ps1`;
+      const batName = `${safeName}.bat`;
+      const ps1 = buildPs1Content([task], initialDelayMs, repeatCount);
+      const bat = buildBatContent(ps1Name);
+      files.push({ name: ps1Name, content: ps1 });
+      files.push({ name: batName, content: bat });
+    }
+
+    const tar = createTar(files);
+    const url = URL.createObjectURL(tar);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'davinvi_tasks.tar';
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
 
   const updateForm = <K extends keyof TaskFormState>(key: K, value: TaskFormState[K]) => {
@@ -450,61 +714,108 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
                   className="plugin-input"
                   value={form.title}
                   onChange={(event) => updateForm('title', event.target.value)}
-                  placeholder="例如：貼上客戶編號"
+                  placeholder="例如：登入後送出"
                 />
               </label>
 
-              <label className="plugin-label">
-                每個動作間隔（ms）
-                <input
-                  className="plugin-input"
-                  type="number"
-                  min={0}
-                  value={form.delayMs}
-                  onChange={(event) => updateForm('delayMs', Number(event.target.value || 0))}
-                />
-              </label>
+              <div style={{ display: 'grid', gap: 8 }}>
+                <label className="plugin-label">
+                  啟動前延遲（ms）
+                  <input
+                    className="plugin-input"
+                    type="number"
+                    min={0}
+                    value={initialDelayMs}
+                    onChange={(event) => setInitialDelayMs(Number(event.target.value || 0))}
+                  />
+                </label>
+
+                <label className="plugin-label">
+                  重複次數（0 = 無限）
+                  <input
+                    className="plugin-input"
+                    type="number"
+                    min={0}
+                    value={repeatCount}
+                    onChange={(event) => setRepeatCount(Number(event.target.value || 0))}
+                  />
+                </label>
+              </div>
             </div>
 
-            <div className="plugin-row plugin-row-2">
-              <label className="plugin-label">
-                按鈕 / 組合鍵
-                <select
-                  className="plugin-select"
-                  value={form.hotkey}
-                  onChange={(event) => updateForm('hotkey', event.target.value)}
-                >
-                  {HOTKEY_PRESETS.map((item) => (
-                    <option value={item.value} key={item.value}>
-                      {item.label}
-                    </option>
+            <div className="plugin-step-builder">
+              <div className="plugin-row plugin-row-3">
+                <label className="plugin-label">
+                  修飾鍵（x）
+                  <select
+                    className="plugin-select"
+                    value={form.stepModifier}
+                    onChange={(event) =>
+                      updateForm('stepModifier', event.target.value as z.infer<typeof ModifierSchema>)
+                    }
+                  >
+                    {MODIFIER_OPTIONS.map((item) => (
+                      <option value={item.value} key={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="plugin-label">
+                  按鍵（input）
+                  <input
+                    className="plugin-input"
+                    value={form.stepKey}
+                    onChange={(event) => updateForm('stepKey', event.target.value)}
+                    placeholder="例如：a、Enter、Tab、F6"
+                  />
+                </label>
+
+                <label className="plugin-label">
+                  該步驟後等待（ms）
+                  <input
+                    className="plugin-input"
+                    type="number"
+                    min={0}
+                    value={form.stepDelayAfterMs}
+                    onChange={(event) =>
+                      updateForm('stepDelayAfterMs', Number(event.target.value || 0))
+                    }
+                  />
+                </label>
+              </div>
+
+              <div className="plugin-actions">
+                <button type="button" className="plugin-btn plugin-btn-alt" onClick={addStep}>
+                  新增步驟
+                </button>
+              </div>
+
+              <p className="plugin-muted">SendKeys 預覽：{normalizedStepPreview || '(尚未輸入按鍵)'}</p>
+
+              {form.steps.length === 0 ? (
+                <div className="plugin-empty">尚未加入任何步驟，請先設定 x + input 後按「新增步驟」。</div>
+              ) : (
+                <div className="plugin-step-list">
+                  {form.steps.map((step, index) => (
+                    <div className="plugin-step-item" key={`${step.modifier}-${step.key}-${index}`}>
+                      <p className="plugin-step-text">
+                        {index + 1}. {stepToLabel(step)} | wait={step.delayAfterMs}ms | sendKeys=
+                        {stepToSendKeys(step)}
+                      </p>
+                      <button
+                        type="button"
+                        className="plugin-btn plugin-btn-danger"
+                        onClick={() => removeStep(index)}
+                      >
+                        移除步驟
+                      </button>
+                    </div>
                   ))}
-                </select>
-              </label>
-
-              <label className="plugin-label">
-                啟動前延遲（ms）
-                <input
-                  className="plugin-input"
-                  type="number"
-                  min={0}
-                  value={initialDelayMs}
-                  onChange={(event) => setInitialDelayMs(Number(event.target.value || 0))}
-                />
-              </label>
+                </div>
+              )}
             </div>
-
-            {form.hotkey === '__CUSTOM__' && (
-              <label className="plugin-label">
-                自訂 SendKeys
-                <input
-                  className="plugin-input"
-                  value={form.customHotkey}
-                  onChange={(event) => updateForm('customHotkey', event.target.value)}
-                  placeholder="例如：^+{F10}"
-                />
-              </label>
-            )}
 
             <div className="plugin-row plugin-row-2">
               <label className="plugin-label">
@@ -525,7 +836,7 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
                   checked={form.requireInput}
                   onChange={(event) => updateForm('requireInput', event.target.checked)}
                 />
-                此動作需要先把資料複製到剪貼簿
+                此任務需要先把資料複製到剪貼簿
               </label>
             </div>
 
@@ -582,8 +893,10 @@ function PluginApp({ context }: PluginAppProps): React.JSX.Element {
                     <div>
                       <h3 className="plugin-task-title">{task.title}</h3>
                       <p className="plugin-task-meta">
-                        hotkey={task.hotkey} | delay={task.delayMs}ms | inputMode={task.inputMode} |
-                        requireInput={String(task.requireInput)}
+                        steps={task.steps.length} ({task.steps
+                          .map((step, index) => `${index + 1}:${stepToLabel(step)}@${step.delayAfterMs}ms`)
+                          .join(' -> ')}) | inputMode={task.inputMode} | requireInput=
+                        {String(task.requireInput)}
                       </p>
                     </div>
                     <button
@@ -672,3 +985,4 @@ const plugin: IPlugin = {
 };
 
 export default plugin;
+
