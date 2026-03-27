@@ -1,3 +1,117 @@
+# Orbit-Davinci / Davinvi Plugin
+
+A small plugin that builds SendKeys-style task scripts (PowerShell + BAT) from a sequence of steps. This repository contains the Davinvi plugin used by the Orbit-Davinci toolbox.
+
+## Features
+- Visual task builder for composing key/send sequences and per-step delays
+- Export tasks as a ZIP containing `.ps1` and `.bat` launchers
+- Import tasks via event bus and persist to plugin storage
+- Mount/unmount friendly React plugin implementing the `IPlugin` interface
+
+## Prerequisites
+- Node.js (18+ recommended)
+- npm, yarn or pnpm
+
+## Quick start (development)
+1. Clone the repo
+
+```bash
+git clone <repo-url>
+cd Orbit-Davinci
+```
+
+2. Install dependencies
+
+```bash
+npm install
+# or `yarn` / `pnpm install`
+```
+
+3. Run the dev server
+
+```bash
+npm run dev
+# open http://localhost:5173
+```
+
+4. Build for production
+
+```bash
+npm run build
+npm run preview
+```
+
+## Using the plugin
+
+The plugin is exported as the default `IPlugin` object from `src/plugin.tsx`. It exposes `mount(container, context)` and `unmount(container)` methods and will inject its styles automatically when mounted.
+
+Basic mounting example (host application):
+
+```ts
+import plugin from './src/plugin';
+
+// `container` is an HTMLElement the plugin can render into
+// `context` should match the host `IAppContext` contract the toolbox provides
+const container = document.getElementById('plugin-host');
+if (container) {
+  plugin.mount(container, appContext);
+}
+
+// When the host is being torn down
+// plugin.unmount(container);
+```
+
+Notes:
+- The plugin will create its own child element with id `plugin-davinci` inside the provided container.
+- Styles are injected at runtime; there is no separate stylesheet to include.
+
+## Events and integration
+
+- Import tasks programmatically by emitting the `DAVINVI_IMPORT_TASKS` event on the host `eventBus`:
+
+```ts
+// `payload` can be an array of tasks or an envelope with nested arrays (the plugin will attempt to locate arrays in common keys)
+appContext.eventBus.emit('DAVINVI_IMPORT_TASKS', payload);
+```
+
+- The plugin emits a `TASK_COUNT_CHANGED` event when tasks are saved to storage. Listen for it to react to changes:
+
+```ts
+appContext.eventBus.on('TASK_COUNT_CHANGED', (meta) => {
+  // meta = { pluginId, count, updatedAt }
+});
+```
+
+## Storage & keys
+- The plugin persists tasks using the storage API exposed by the host under the key `tasks` and saves with plugin id `davinci`.
+
+## Exported artifacts
+- When you click "下載 PS1 + BAT" the plugin will generate a ZIP archive containing:
+  - One `.ps1` PowerShell script per task
+  - A `Click to Start.bat` wrapper that launches the generated `.ps1`
+
+Windows note: if PowerShell execution policy prevents running the `.ps1` directly, run the provided `.bat` (it calls PowerShell with `-ExecutionPolicy Bypass`).
+
+## Quick examples
+
+- Example: import a simple task list
+
+```js
+const tasks = [
+  { id: '1', title: 'Send A', steps: [{ modifier: 'none', key: 'a', delayAfterMs: 500 }], requireInput: false, inputMode: 'manual', manualValue: '', listValues: [] }
+];
+appContext.eventBus.emit('DAVINVI_IMPORT_TASKS', tasks);
+```
+
+## Troubleshooting
+- If styles don't appear, ensure your bundler supports the `?inline` import used for styles. The plugin injects styles at mount time using an inline string.
+- If you see stale cached bundles in development, unregister service workers and clear the browser cache.
+
+## Contributing
+- Open issues or PRs against this repository. Keep changes small and focused.
+
+## License
+This project follows the license in the repository root.
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
