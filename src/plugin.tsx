@@ -10,7 +10,7 @@ import prefixedStyles from './styles.css?inline';
 
 const PLUGIN_NAME = 'Davinvi';
 const PLUGIN_ID = 'davinci';
-const PLUGIN_VERSION = '1.0.0';
+const PLUGIN_VERSION = '1';
 const STORAGE_KEY = 'tasks';
 const TASK_COUNT_CHANGED = 'TASK_COUNT_CHANGED';
 const IMPORT_TASKS_EVENT = 'DAVINVI_IMPORT_TASKS';
